@@ -128,6 +128,7 @@ impl Stream for UdpSocket {
     type Item = UdpPkt;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let _g = super::LWIP_MUTEX.lock();
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(pkt)) => Poll::Ready(Some(pkt)),
             Poll::Ready(None) => Poll::Ready(None),

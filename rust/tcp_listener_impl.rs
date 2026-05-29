@@ -89,6 +89,7 @@ impl Stream for TcpListenerImpl {
     type Item = (TcpStream, SocketAddr, SocketAddr);
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let _g = LWIP_MUTEX.lock();
         if let Some(stream) = self.queue.pop_front() {
             let local_addr = stream.local_addr().to_owned();
             let remote_addr = stream.remote_addr().to_owned();

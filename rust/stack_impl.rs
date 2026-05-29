@@ -78,6 +78,7 @@ impl Stream for NetStackImpl {
     type Item = io::Result<Vec<u8>>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let _g = LWIP_MUTEX.lock();
         match self.rx.poll_recv(cx) {
             Poll::Ready(Some(pkt)) => Poll::Ready(Some(Ok(pkt))),
             Poll::Ready(None) => Poll::Ready(None),
