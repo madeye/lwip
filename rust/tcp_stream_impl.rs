@@ -218,6 +218,19 @@ impl Drop for TcpStreamImpl {
                 tcp_poll(self.pcb as *mut tcp_pcb, None, 0);
                 if !ctx.closed {
                     tcp_abort(self.pcb as *mut tcp_pcb);
+                } else {
+                    // poll_shutdown already half-closed TX (tcp_shutdown rx=0
+                    // tx=1), so the pcb is in FIN_WAIT_1/2 awaiting the peer's
+                    // FIN. Without TF_RXCLOSED, lwIP's slowtmr never reaps a
+                    // FIN_WAIT_2 pcb — a peer that vanishes without FINing
+                    // (suspended iOS app, dead link) leaks the pcb plus its
+                    // unacked segments forever. tcp_close on an already
+                    // TX-shut pcb just sets TF_RXCLOSED, enabling the
+                    // TCP_FIN_WAIT_TIMEOUT (20 s) reap; it frees nothing we
+                    // still reference. Fall back to abort if it errors.
+                    if tcp_close(self.pcb as *mut tcp_pcb) != err_enum_t_ERR_OK as err_t {
+                        tcp_abort(self.pcb as *mut tcp_pcb);
+                    }
                 }
             }
         }

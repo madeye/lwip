@@ -119,8 +119,14 @@ impl Sink<Vec<u8>> for NetStackImpl {
 
                 let pbuf = pbuf_alloc(pbuf_layer_PBUF_RAW, item.len() as u16_t, pbuf_type_PBUF_RAM);
                 if pbuf.is_null() {
-                    log::trace!("pbuf_alloc null alloc");
-                    return Poll::Pending;
+                    // lwIP heap exhaustion. Returning Pending here without
+                    // registering a waker would park the Sink future forever
+                    // (nothing ever re-polls it), deadlocking the netstack
+                    // driver task that owns both ingress and egress. An IP
+                    // device is allowed to drop frames under memory pressure
+                    // — the sender retransmits — so drop and report success.
+                    log::warn!("pbuf_alloc failed (heap exhausted), dropping {} byte frame", item.len());
+                    return Poll::Ready(Ok(()));
                 }
                 pbuf_take(
                     pbuf,
@@ -130,15 +136,15 @@ impl Sink<Vec<u8>> for NetStackImpl {
 
                 if let Some(input_fn) = (*netif_list).input {
                     let err = input_fn(pbuf, netif_list);
-                    if err == err_enum_t_ERR_OK as err_t {
-                        Poll::Ready(Ok(()))
-                    } else {
+                    if err != err_enum_t_ERR_OK as err_t {
+                        // A rejected frame is a per-packet event (e.g. ERR_MEM
+                        // mid-burst), not a stack-fatal one. Drop it instead of
+                        // erroring the Sink: callers treat a Sink error as
+                        // fatal and tear down the whole packet path.
                         pbuf_free(pbuf);
-                        Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::Interrupted,
-                            format!("input error: {}", err),
-                        )))
+                        log::warn!("netif input rejected frame: {}", err);
                     }
+                    Poll::Ready(Ok(()))
                 } else {
                     pbuf_free(pbuf);
                     Poll::Ready(Err(io::Error::new(
