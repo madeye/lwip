@@ -36,9 +36,24 @@ impl AtomicMutex {
     }
 
     pub fn lock(&self) -> AtomicMutexGuard<'_> {
+        // Bounded spin, then yield. The previous pure `loop { try_lock }`
+        // burned the whole OS thread while waiting: on a small tokio
+        // runtime (worker_threads(2) in the iOS packet tunnel), one worker
+        // holding the lock in sys_check_timeouts while another spun here
+        // meant NO other task could be polled — with enough contenders the
+        // runtime live-locked permanently. Yielding lets the OS reschedule
+        // the holder (and lets other runtime threads make progress) at the
+        // cost of a syscall on the slow path.
+        let mut spins = 0u32;
         loop {
             if let Ok(m) = self.try_lock() {
                 break m;
+            }
+            spins += 1;
+            if spins < 64 {
+                std::hint::spin_loop();
+            } else {
+                std::thread::yield_now();
             }
         }
     }

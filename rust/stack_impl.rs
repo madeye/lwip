@@ -16,6 +16,14 @@ pub struct NetStackImpl {
     tx: Sender<Vec<u8>>,
     rx: Receiver<Vec<u8>>,
     sink_buf: Option<Vec<u8>>, // We're flushing per item, no need large buffer.
+    // Drives lwIP's sys_check_timeouts; aborted in Drop. Without the abort,
+    // every NetStackImpl ever created leaks an immortal 250 ms timer task.
+    // A consumer that restarts its stack on network changes (e.g. an iOS
+    // packet tunnel cycling on sleep/wake) accumulates them: ~100 leaked
+    // tasks contending for the LWIP_MUTEX spin lock every 250 ms saturated
+    // both tokio workers — one inside sys_check_timeouts, one spinning —
+    // and live-locked the entire runtime (observed on-device 2026-06-07).
+    timeout_task: tokio::task::JoinHandle<()>,
 }
 
 impl NetStackImpl {
@@ -30,26 +38,30 @@ impl NetStackImpl {
 
         let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel(buffer_size);
 
-        let stack = Box::new(NetStackImpl {
-            waker: None,
-            tx,
-            rx,
-            sink_buf: None,
-        });
-
-        unsafe {
-            OUTPUT_CB_PTR = &*stack as *const NetStackImpl as usize;
-        }
-
-        tokio::spawn(async move {
+        let timeout_task = tokio::spawn(async move {
             loop {
                 {
                     let _g = LWIP_MUTEX.lock();
                     unsafe { sys_check_timeouts() };
                 }
+                // The guard is released before this await: abort() can only
+                // cancel the task at the await point, so the lock is never
+                // abandoned in the locked state.
                 tokio::time::sleep(time::Duration::from_millis(250)).await;
             }
         });
+
+        let stack = Box::new(NetStackImpl {
+            waker: None,
+            tx,
+            rx,
+            sink_buf: None,
+            timeout_task,
+        });
+
+        unsafe {
+            OUTPUT_CB_PTR = &*stack as *const NetStackImpl as usize;
+        }
 
         stack
     }
@@ -67,9 +79,16 @@ impl NetStackImpl {
 impl Drop for NetStackImpl {
     fn drop(&mut self) {
         log::trace!("drop netstack");
+        self.timeout_task.abort();
         unsafe {
             let _g = LWIP_MUTEX.lock();
-            OUTPUT_CB_PTR = 0x0;
+            // Only clear the output hook if it still points at us. If a
+            // successor stack was created before this one finished tearing
+            // down (a stop/start race in the consumer), unconditionally
+            // zeroing here would sever the LIVE stack's egress path.
+            if OUTPUT_CB_PTR == self as *const NetStackImpl as usize {
+                OUTPUT_CB_PTR = 0x0;
+            }
         };
     }
 }
