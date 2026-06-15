@@ -1,10 +1,31 @@
-use std::sync::atomic::{AtomicBool, Ordering::*};
+use parking_lot::{Mutex, MutexGuard};
 
-#[derive(Debug)]
+/// Global serialization lock for every lwIP entry point.
+///
+/// This was a hand-rolled `AtomicBool` spin lock whose contention path called
+/// `std::thread::yield_now()`. That yields the OS thread but NOT the tokio
+/// scheduler, so a worker spinning here never returns to poll other tasks:
+/// under a connection burst on a small (2–4 worker) runtime, a worker spinning
+/// for the lock could starve the holder and wedge the entire runtime — the iOS
+/// packet-tunnel total-freeze (packet count flat, control API dead).
+///
+/// It is now a real parking mutex (`parking_lot::Mutex`). A contender does a
+/// brief adaptive spin and then BLOCKS at the OS level, so the scheduler
+/// immediately runs the lock holder and the lock always drains — livelock is
+/// impossible. The type/method names are kept (`AtomicMutex`, `AtomicMutexErr`,
+/// `try_lock`, `lock`) so existing call sites and the `LWIPMutexGuard` alias
+/// are untouched.
+///
+/// The lock is non-reentrant: lwIP callbacks run with it already held and must
+/// never re-acquire it (they don't — they take `assume_locked` references to
+/// the already-locked state). The guard is `!Send`, which additionally turns
+/// "held across an `.await`" into a compile error instead of a latent deadlock.
+#[derive(Debug, Default)]
 pub struct AtomicMutex {
-    locked: AtomicBool,
+    inner: Mutex<()>,
 }
 
+/// Error returned by [`AtomicMutex::try_lock`] when the lock is already held.
 #[derive(Debug, Clone, Copy)]
 pub struct AtomicMutexErr;
 
@@ -16,58 +37,32 @@ impl std::fmt::Display for AtomicMutexErr {
 
 impl std::error::Error for AtomicMutexErr {}
 
+/// RAII guard; dropping it unlocks the mutex.
 pub struct AtomicMutexGuard<'a> {
-    mutex: &'a AtomicMutex,
+    _guard: MutexGuard<'a, ()>,
 }
 
 impl AtomicMutex {
     pub const fn new() -> Self {
         Self {
-            locked: AtomicBool::new(false),
+            inner: Mutex::new(()),
         }
     }
 
+    // Kept for API parity with the previous hand-rolled mutex (and so the
+    // `AtomicMutexErr` / `Error::AtomicMutexErr` variant stays live); no
+    // current caller now that `lock()` delegates straight to parking_lot.
+    #[allow(dead_code)]
     pub fn try_lock(&self) -> Result<AtomicMutexGuard<'_>, AtomicMutexErr> {
-        if self.locked.swap(true, Acquire) {
-            Err(AtomicMutexErr)
-        } else {
-            Ok(AtomicMutexGuard { mutex: self })
+        match self.inner.try_lock() {
+            Some(guard) => Ok(AtomicMutexGuard { _guard: guard }),
+            None => Err(AtomicMutexErr),
         }
     }
 
     pub fn lock(&self) -> AtomicMutexGuard<'_> {
-        // Bounded spin, then yield. The previous pure `loop { try_lock }`
-        // burned the whole OS thread while waiting: on a small tokio
-        // runtime (worker_threads(2) in the iOS packet tunnel), one worker
-        // holding the lock in sys_check_timeouts while another spun here
-        // meant NO other task could be polled — with enough contenders the
-        // runtime live-locked permanently. Yielding lets the OS reschedule
-        // the holder (and lets other runtime threads make progress) at the
-        // cost of a syscall on the slow path.
-        let mut spins = 0u32;
-        loop {
-            if let Ok(m) = self.try_lock() {
-                break m;
-            }
-            spins += 1;
-            if spins < 64 {
-                std::hint::spin_loop();
-            } else {
-                std::thread::yield_now();
-            }
+        AtomicMutexGuard {
+            _guard: self.inner.lock(),
         }
-    }
-}
-
-impl Default for AtomicMutex {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<'a> Drop for AtomicMutexGuard<'a> {
-    fn drop(&mut self) {
-        let _prev = self.mutex.locked.swap(false, Release);
-        debug_assert!(_prev);
     }
 }
