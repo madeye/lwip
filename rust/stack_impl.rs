@@ -144,7 +144,10 @@ impl Sink<Vec<u8>> for NetStackImpl {
                     // driver task that owns both ingress and egress. An IP
                     // device is allowed to drop frames under memory pressure
                     // — the sender retransmits — so drop and report success.
-                    log::warn!("pbuf_alloc failed (heap exhausted), dropping {} byte frame", item.len());
+                    log::warn!(
+                        "pbuf_alloc failed (heap exhausted), dropping {} byte frame",
+                        item.len()
+                    );
                     return Poll::Ready(Ok(()));
                 }
                 pbuf_take(
