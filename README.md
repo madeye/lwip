@@ -1,3 +1,13 @@
+> **This is `meow-lwip`, a fork of [`lwip`](https://crates.io/crates/lwip)
+> (ssrlive/lwip), published under a distinct name.** The Rust layer diverges
+> from upstream: the core is single-owner (`LWIP_MUTEX` removed entirely), and
+> it carries fixes for a data race / use-after-free in `Stream::poll_next`, a
+> `poll_flush` Pending-without-waker deadlock, a FIN_WAIT_2 pcb leak and a
+> timer-task livelock. The C lwIP sources are unmodified upstream lwIP.
+>
+> Use `lwip = { package = "meow-lwip", version = "0.3" }` to depend on it under
+> the familiar `lwip` name.
+
 lwip - A Rust wrapper for lwIP
 ==============================
 

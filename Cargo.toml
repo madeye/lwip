@@ -1,17 +1,29 @@
 [package]
-name = "lwip"
+# Fork of `lwip` (ssrlive/lwip) published under a distinct name because the
+# Rust layer diverges: single-owner core (no LWIP_MUTEX), plus fixes for a
+# data race / UAF in `Stream::poll_next`, a `poll_flush` Pending-without-waker
+# deadlock, a FIN_WAIT_2 pcb leak and a timer-task livelock. Consumed by
+# meow-rs (github.com/madeye/meow-rs) for its TUN inbound; crates.io forbids
+# git dependencies, hence a published fork rather than a `git =` pin.
+name = "meow-lwip"
 version = "0.3.15"
 edition = "2021"
-description = "Rust bindings for the lwIP TCP/IP stack"
+description = "Rust bindings for the lwIP TCP/IP stack (madeye fork, single-owner core)"
 license = "MIT/Apache-2.0"
-authors = ["@ssrlive"]
-documentation = "https://docs.rs/lwip"
-homepage = "https://github.com/ssrlive/lwip"
+authors = ["@ssrlive", "@madeye"]
+documentation = "https://docs.rs/meow-lwip"
+repository = "https://github.com/madeye/lwip"
+homepage = "https://github.com/madeye/lwip"
 readme = "README.md"
+keywords = ["lwip", "tcp-ip", "netstack", "tun", "network"]
+categories = ["network-programming", "external-ffi-bindings"]
 rust-version = "1.70.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
+# Keep the Rust lib target named `lwip` so dependents can use the crate as
+# `lwip = { package = "meow-lwip", ... }` with no source changes.
+name = "lwip"
 crate-type = ["lib", "cdylib"]
 path = "rust/lib.rs"
 
